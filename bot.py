@@ -1,8 +1,6 @@
 import discord
 from discord.ext import commands
-import os
-import re
-from collections import defaultdict
+import os, re, json
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
@@ -11,19 +9,27 @@ if not TOKEN:
 KANAL_SADNJE = 1518237730029437241
 KANAL_ISPLATA = 1517872592244052038
 CENA_PO_SADNJI = 30
+DATA_FILE = "sadnje_data.json"
 
 intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+def ucitaj_data():
+    if not os.path.exists(DATA_FILE):
+        return {}
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def sacuvaj_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
 def tekst_poruke(msg):
     tekst = msg.content or ""
-
     for e in msg.embeds:
-        data = e.to_dict()
-        tekst += "\n" + str(data)
-
+        tekst += "\n" + str(e.to_dict())
     return tekst
 
 @bot.event
@@ -43,7 +49,7 @@ async def ukupnesadnje(ctx):
     if kanal is None:
         kanal = await bot.fetch_channel(KANAL_SADNJE)
 
-    rezultati = {}
+    trenutne_sadnje = {}
 
     async for msg in kanal.history(limit=2000):
         tekst = tekst_poruke(msg)
@@ -59,21 +65,52 @@ async def ukupnesadnje(ctx):
 
         mention = re.search(r"<@!?(\d+)>", tekst)
         if mention:
-            ime = f"<@{mention.group(1)}>"
+            user_key = mention.group(1)
+            prikaz = f"<@{user_key}>"
         else:
             name = re.search(r"@([A-Za-z0-9_.\-]+)", tekst)
-            ime = f"@{name.group(1)}" if name else "Nepoznat"
+            if not name:
+                continue
+            user_key = name.group(1)
+            prikaz = f"@{user_key}"
 
-        if ime not in rezultati or ukupno > rezultati[ime]:
-            rezultati[ime] = ukupno
+        if user_key not in trenutne_sadnje or ukupno > trenutne_sadnje[user_key]["ukupno"]:
+            trenutne_sadnje[user_key] = {
+                "prikaz": prikaz,
+                "ukupno": ukupno
+            }
 
-    if not rezultati:
+    if not trenutne_sadnje:
         await ctx.send("Nema pronađenih sadnji.")
         return
 
+    prosle_sadnje = ucitaj_data()
     linije = []
-    for ime, ukupno in sorted(rezultati.items(), key=lambda x: x[1], reverse=True):
-        linije.append(f"{ime} {ukupno * CENA_PO_SADNJI}$ {ukupno} sadnji")
+
+    for user_key, info in sorted(trenutne_sadnje.items(), key=lambda x: x[1]["ukupno"], reverse=True):
+        trenutno = info["ukupno"]
+        proslo = prosle_sadnje.get(user_key, 0)
+        razlika = trenutno - proslo
+
+        if razlika <= 0:
+            continue
+
+        isplata = razlika * CENA_PO_SADNJI
+
+        linije.append(
+            f"{info['prikaz']} {isplata}$ {razlika} sadnji"
+        )
+
+    nova_data = {
+        user_key: info["ukupno"]
+        for user_key, info in trenutne_sadnje.items()
+    }
+
+    sacuvaj_data(nova_data)
+
+    if not linije:
+        await ctx.send("Nema novih sadnji za isplatu.")
+        return
 
     poruka = "\n".join(linije)
 
